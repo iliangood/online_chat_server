@@ -26,8 +26,8 @@ const Request_type = union(enum(u8)) {
             },
         },
     },
-    get_info: enum {
-        msg_count,
+    get_info: union(enum(u8)) {
+        msg_count: void,
     },
 };
 
@@ -41,12 +41,21 @@ const Request_vec = struct {
     connection: std.Io.net.Stream,
 };
 
-fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream) !Request_vec {
+// const Response_type= enum {
+//     get_msg,
+//     get_info,
+// };
+
+const getMsg_error = error{ LimitedAllocError, TooShortPacket, Cancelable, OutOfMemory };
+
+fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream, flag: *u32) getMsg_error!Request_vec {
+    errdefer connection.close(io);
     var buf_reader: [4096]u8 = undefined;
     var reader = connection.reader(io, &buf_reader);
     const msg = try reader.interface.allocRemaining(allocator, .unlimited);
+    errdefer allocator.free(msg);
     if (msg.len < 2) {
-        return error{TooShortPacket};
+        try error{TooShortPacket};
     }
     const requests_count = @as(u16, @bitCast(msg[0..2]));
     const requests_msg = msg[2..];
@@ -67,7 +76,59 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
         };
         res_requests[i] = Request{ .type = request, .data = cur_buf };
     }
+    flag.* = 1;
+    io.futexWake(u32, flag, 1);
+    try io.checkCancel();
     return .{ .requests = res_requests, .data = msg, .connection = connection };
+}
+
+fn connection_handler(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream, queue: *std.Deque(Request_vec), queue_mutext: *std.Io.Mutex) void {
+    var flag: u32 = 0;
+    var future = io.async(getMsg, .{ io, allocator, connection, &flag });
+    io.futexWaitTimeout(u32, &flag, 0, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+    const res: Request_vec = future.cancel(io) catch |err| {
+        switch (err) {
+            getMsg_error.Cancelable => {},
+            else => std.log.err("error:{}\n", err),
+        }
+        return;
+    };
+    queue_mutext.lock(io);
+    defer queue_mutext.unlock(io);
+    queue.pushBack(allocator, res);
+}
+
+const serverThread_id: u32 = 1 << 0;
+fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, thread_table: *u32) !void {
+    defer {
+        thread_table &= ~serverThread_id;
+        io.futexWake(u32, thread_counter, 1);
+    }
+    const port = 44099;
+    const address = std.Io.net.IpAddress{ .ip4 = .unspecified(port) };
+    var server = try address.listen(io, .{ .mode = .stream, .protocol = .tcp, .reuse_address = true });
+    var group = std.Io.Group.init;
+    while (true) {
+        const connection = try server.accept(io);
+        group.async(io, connection_handler, .{ io, allocator, connection, queue, queue_mutex });
+    }
+}
+
+fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u32, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Messaege), requests: Request_vec) !void {
+    defer allocator.free(requests.data);
+    defer requests.connection.close(io);
+    var response = try std.ArrayList(u8).initCapacity(allocator, 64);
+    for (requests.requests) |request| {
+        switch (request.type) {
+            .get_info => |req| switch (req) {
+                .msg_count => {
+                    const res: u64 = @intCast(messages.items.len);
+                    try response.appendSlice(allocator, @bitCast(res));
+                },
+            },
+            .get_msg => |req| {},
+        }
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -87,15 +148,6 @@ pub fn main(init: std.process.Init) !void {
     var queue_mutex = std.Io.Mutex.init;
     var queue = try std.Deque(Request_vec).initCapacity(allocator, 64);
 
-    var messages = try std.ArrayList(Messaege).initCapacity(allocator, 64);
-    _ = messages;
-    const port: u16 = 44089;
-    const address = std.Io.net.IpAddress{ .ip4 = .unspecified(port) };
-    var server = try address.listen(io, .{ .reuse_address = true });
-    defer server.deinit(io);
-    while (!should_exit) {
-        // server.accept(io: Io)
-    }
     // for (messages.items) |*msg| {}
     // try writer.print("end\n", .{});
 }
