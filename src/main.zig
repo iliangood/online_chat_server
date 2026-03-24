@@ -78,7 +78,6 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
     }
     flag.* = 1;
     io.futexWake(u32, flag, 1);
-    try io.checkCancel();
     return .{ .requests = res_requests, .data = msg, .connection = connection };
 }
 
