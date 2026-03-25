@@ -101,7 +101,7 @@ const serverThread_id: u32 = 1 << 0;
 fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, thread_table: *u32) !void {
     defer {
         thread_table &= ~serverThread_id;
-        io.futexWake(u32, thread_counter, 1);
+        io.futexWake(u32, thread_table, 1);
     }
     const port = 44099;
     const address = std.Io.net.IpAddress{ .ip4 = .unspecified(port) };
@@ -125,7 +125,15 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u3
                     try response.appendSlice(allocator, @bitCast(res));
                 },
             },
-            .get_msg => |req| {},
+            .get_msg => |req| {
+                const chat_id = req.chat_id;
+                switch (req.mode) {
+                    .all => {
+                        var res = try std.ArrayList(u8).initCapacity(allocator, 512);
+                        queue_mutex.lock(io);
+                    },
+                }
+            },
         }
     }
 }
