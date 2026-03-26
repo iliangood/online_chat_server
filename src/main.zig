@@ -1,6 +1,6 @@
 const std = @import("std");
-const Messaege = struct {
-    chat_id: u128,
+const Message = struct {
+    chat_id: u64,
     data: []u8,
 };
 var should_exit = false;
@@ -9,23 +9,27 @@ fn handleSigInt(sig: std.os.linux.SIG) callconv(.c) void {
     should_exit = true;
 }
 
+const Msg_range = union(enum(u8)) {
+    all: void,
+    latest: struct { limit: u64 },
+    range: struct {
+        is_rev: bool,
+        start: u64,
+        end: u64,
+    },
+};
+
+const Msgs_target = struct {
+    chat_id: u64,
+    mode: Msg_range,
+};
+
 const Request_type = union(enum(u8)) {
     send_msg: struct {
-        chat_id: u128,
+        chat_id: u64,
         len: u64,
     },
-    get_msg: struct {
-        chat_id: u128,
-        mode: union(enum(u8)) {
-            all: void,
-            latest: struct { limit: u64 },
-            range: struct {
-                is_rev: bool,
-                start: u64,
-                end: u64,
-            },
-        },
-    },
+    get_msg: Msgs_target,
     get_info: union(enum(u8)) {
         msg_count: void,
     },
@@ -40,11 +44,6 @@ const Request_vec = struct {
     data: []u8,
     connection: std.Io.net.Stream,
 };
-
-// const Response_type= enum {
-//     get_msg,
-//     get_info,
-// };
 
 const getMsg_error = error{ LimitedAllocError, TooShortPacket, Cancelable, OutOfMemory };
 
@@ -113,7 +112,22 @@ fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Requ
     }
 }
 
-fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u32, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Messaege), requests: Request_vec) !void {
+fn getMessages(allocator: std.mem.Allocator, messages: *std.ArrayList(Message), target: Msgs_target) [][]u8 {
+    const chat_id = target.chat_id;
+    var res =
+        switch (target.mode) {
+            .all => {},
+            .latest => {},
+            .range => {},
+        };
+}
+
+// Формат ответа:
+// n: u64 = количество ответов
+// _: [n]u64 = сдвиги ответов
+// _: [_]u8 = данные ответов по сдвигам
+
+fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u32, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Message), requests: Request_vec) !void {
     defer allocator.free(requests.data);
     defer requests.connection.close(io);
     var response = try std.ArrayList(u8).initCapacity(allocator, 64);
@@ -130,7 +144,6 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u3
                 switch (req.mode) {
                     .all => {
                         var res = try std.ArrayList(u8).initCapacity(allocator, 512);
-                        queue_mutex.lock(io);
                     },
                 }
             },
