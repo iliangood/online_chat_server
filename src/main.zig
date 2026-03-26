@@ -53,11 +53,11 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
     var reader = connection.reader(io, &buf_reader);
     const msg = try reader.interface.allocRemaining(allocator, .unlimited);
     errdefer allocator.free(msg);
-    if (msg.len < 2) {
+    if (msg.len < 8) {
         try error{TooShortPacket};
     }
-    const requests_count = @as(u16, @bitCast(msg[0..2]));
-    const requests_msg = msg[2..];
+    const requests_count = @as(u64, @bitCast(msg[0..8]));
+    const requests_msg = msg[8..];
     if (requests_msg.len < requests_count * @sizeOf(Request_type)) {
         return error{TooShortPacket};
     }
@@ -177,10 +177,11 @@ fn getMessages(allocator: std.mem.Allocator, messages: *std.ArrayList(Message), 
 // _: [_]u8 = данные ответов по сдвигам
 // для сообщений схема аналогичная относительно начала ответа
 
-fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u32, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Message), requests: Request_vec) !void {
+fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.ArrayList(Message), requests: Request_vec) !void {
     defer allocator.free(requests.data);
     defer requests.connection.close(io);
     var response = try std.ArrayList(u8).initCapacity(allocator, 64);
+    defer response.deinit(allocator);
     for (requests.requests) |request| {
         switch (request.type) {
             .get_info => |req| switch (req) {
@@ -191,6 +192,7 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u3
             },
             .get_msg => |req| {
                 const msgs = try getMessages(allocator, messages, req);
+                defer allocator.free(msgs);
                 response.appendSlice(allocator, @bitCast(@as(u64, @intCast(msgs.len))));
                 var cur_offset: u64 = 0;
                 for (msgs) |msg| {
@@ -204,6 +206,12 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u3
             .send_msg => {},
         }
     }
+
+    var writer = requests.connection.writer(io, &.{});
+    writer.interface.write(response.items);
+    requests.connection.close(io);
+    allocator.free(requests.data);
+    allocator.free(requests.requests);
 }
 
 pub fn main(init: std.process.Init) !void {
