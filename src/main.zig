@@ -112,20 +112,70 @@ fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Requ
     }
 }
 
-fn getMessages(allocator: std.mem.Allocator, messages: *std.ArrayList(Message), target: Msgs_target) [][]u8 {
+fn getMessages(allocator: std.mem.Allocator, messages: *std.ArrayList(Message), target: Msgs_target) error{OutOfMemory}![][]u8 {
     const chat_id = target.chat_id;
-    var res =
-        switch (target.mode) {
-            .all => {},
-            .latest => {},
-            .range => {},
-        };
+    switch (target.mode) {
+        .all => {
+            var res = try std.ArrayList([]u8).initCapacity(allocator, 64);
+            errdefer res.deinit(allocator);
+            for (messages.items) |msg| {
+                if (msg.chat_id == chat_id) {
+                    try res.append(allocator, msg.data);
+                }
+            }
+            return try res.toOwnedSlice(allocator);
+        },
+        .latest => |mode| {
+            return getMessages(allocator, messages, .{
+                .chat_id = target.chat_id,
+                .mode = .{
+                    .range = .{
+                        .is_rev = true,
+                        .start = 0,
+                        .end = mode.limit,
+                    },
+                },
+            });
+        },
+        .range => |mode| {
+            var res = try std.ArrayList([]u8).initCapacity(allocator, 64);
+            errdefer res.deinit(allocator);
+            if (mode.is_rev) {
+                var cur: usize = 0;
+                var i = messages.items.len -% 1;
+                while (cur < mode.start and i < messages.items.len) : (i -%= 1) {
+                    cur += @intFromBool(messages.items[i].chat_id == chat_id);
+                }
+                while (cur < mode.end and i < messages.items.len) : (i -%= 1) {
+                    if (messages.items[i].chat_id == chat_id) {
+                        cur += 1;
+                        try res.append(allocator, messages.items[i].data);
+                    }
+                }
+                std.mem.reverse([]u8, res.items);
+                return try res.toOwnedSlice(allocator);
+            }
+            var cur: usize = 0;
+            var i: usize = 0;
+            while (cur < mode.start and i < messages.items.len) : (i += 1) {
+                cur += @intFromBool(messages.items[i].chat_id == chat_id);
+            }
+            while (cur < mode.end and i < messages.items.len) : (i += 1) {
+                if (messages.items[i].chat_id == chat_id) {
+                    cur += 1;
+                    try res.append(allocator, messages.items[i].data);
+                }
+            }
+            return try res.toOwnedSlice(allocator);
+        },
+    }
 }
 
 // Формат ответа:
 // n: u64 = количество ответов
 // _: [n]u64 = сдвиги ответов
 // _: [_]u8 = данные ответов по сдвигам
+// для сообщений схема аналогичная относительно начала ответа
 
 fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u32, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Message), requests: Request_vec) !void {
     defer allocator.free(requests.data);
@@ -140,13 +190,18 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, thread_table: *u3
                 },
             },
             .get_msg => |req| {
-                const chat_id = req.chat_id;
-                switch (req.mode) {
-                    .all => {
-                        var res = try std.ArrayList(u8).initCapacity(allocator, 512);
-                    },
+                const msgs = try getMessages(allocator, messages, req);
+                response.appendSlice(allocator, @bitCast(@as(u64, @intCast(msgs.len))));
+                var cur_offset: u64 = 0;
+                for (msgs) |msg| {
+                    response.appendSlice(allocator, @bitCast(cur_offset));
+                    cur_offset += @intCast(msg.len);
+                }
+                for (msgs) |msg| {
+                    response.appendSlice(allocator, msg);
                 }
             },
+            .send_msg => {},
         }
     }
 }
