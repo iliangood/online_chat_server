@@ -203,7 +203,11 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.Ar
                     response.appendSlice(allocator, msg);
                 }
             },
-            .send_msg => {},
+            .send_msg => |req| {
+                const msg_text = try allocator.dupe(u8, request.data);
+                const msg = Message{ .data = msg_text, .chat_id = req.chat_id };
+                messages.appendSlice(allocator, msg);
+            },
         }
     }
 
