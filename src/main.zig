@@ -43,13 +43,18 @@ const Request_vec = struct {
     requests: []Request,
     data: []u8,
     connection: std.Io.net.Stream,
+    fn deinit(self: *Request_vec, io: std.Io, allocator: std.mem.Allocator) void {
+        allocator.free(self.requests);
+        allocator.free(self.data);
+        self.connection.close(io);
+    }
 };
 
 const getMsg_error = error{ LimitedAllocError, TooShortPacket, Cancelable, OutOfMemory };
 
 fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream, flag: *u32) getMsg_error!Request_vec {
     errdefer connection.close(io);
-    var buf_reader: [4096]u8 = undefined;
+    var buf_reader: [16384]u8 = undefined;
     var reader = connection.reader(io, &buf_reader);
     const msg = try reader.interface.allocRemaining(allocator, .unlimited);
     errdefer allocator.free(msg);
@@ -94,6 +99,7 @@ fn connection_handler(io: std.Io, allocator: std.mem.Allocator, connection: std.
     queue_mutext.lock(io);
     defer queue_mutext.unlock(io);
     queue.pushBack(allocator, res);
+    io.futexWake(usize, &queue.len, 1);
 }
 
 const serverThread_id: u32 = 1 << 0;
@@ -105,7 +111,9 @@ fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Requ
     const port = 44099;
     const address = std.Io.net.IpAddress{ .ip4 = .unspecified(port) };
     var server = try address.listen(io, .{ .mode = .stream, .protocol = .tcp, .reuse_address = true });
+    defer server.deinit(io);
     var group = std.Io.Group.init;
+    defer group.cancel(io);
     while (true) {
         const connection = try server.accept(io);
         group.async(io, connection_handler, .{ io, allocator, connection, queue, queue_mutex });
@@ -178,8 +186,6 @@ fn getMessages(allocator: std.mem.Allocator, messages: *std.ArrayList(Message), 
 // для сообщений схема аналогичная относительно начала ответа
 
 fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.ArrayList(Message), requests: Request_vec) !void {
-    defer allocator.free(requests.data);
-    defer requests.connection.close(io);
     var response = try std.ArrayList(u8).initCapacity(allocator, 64);
     defer response.deinit(allocator);
     for (requests.requests) |request| {
@@ -214,8 +220,22 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.Ar
     var writer = requests.connection.writer(io, &.{});
     writer.interface.write(response.items);
     requests.connection.close(io);
-    allocator.free(requests.data);
     allocator.free(requests.requests);
+}
+const request_processor_thread_id: u32 = 1 << 1;
+fn request_processor_thread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Message), thread_table: *u32) !void {
+    defer {
+        thread_table &= ~request_processor_thread_id;
+        io.futexWake(u32, thread_table, 1);
+    }
+    while (true) {
+        io.futexWait(usize, &queue.len, 0);
+        queue_mutex.lock(io);
+        const requests = queue.popBack().?;
+        defer requests.deinit(allocator);
+        queue_mutex.unlock(io);
+        request_processor(io, allocator, messages, requests);
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -234,7 +254,8 @@ pub fn main(init: std.process.Init) !void {
 
     var queue_mutex = std.Io.Mutex.init;
     var queue = try std.Deque(Request_vec).initCapacity(allocator, 64);
+    defer queue.deinit(allocator);
 
-    // for (messages.items) |*msg| {}
-    // try writer.print("end\n", .{});
+    var thread_table: u32 = serverThread_id | request_processor_thread_id;
+    std.Thread.spawn(.{}, serverThread, .{ io, allocator, &queue, &queue_mutex, &thread_table });
 }
