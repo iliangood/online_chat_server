@@ -50,7 +50,7 @@ const Request_vec = struct {
     }
 };
 
-const getMsg_error = error{ LimitedAllocError, TooShortPacket, Cancelable, OutOfMemory };
+const getMsg_error = error{ LimitedAllocError, TooShortPacket, OutOfMemory, ReadFailed, StreamTooLong } || std.Io.Cancelable;
 
 fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream, flag: *u32) getMsg_error!Request_vec {
     errdefer connection.close(io);
@@ -59,9 +59,9 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
     const msg = try reader.interface.allocRemaining(allocator, .unlimited);
     errdefer allocator.free(msg);
     if (msg.len < 8) {
-        try error{TooShortPacket};
+        return getMsg_error.TooShortPacket;
     }
-    const requests_count = @as(u64, @bitCast(msg[0..8]));
+    const requests_count = std.mem.readInt(u64, msg[0..8], .little);
     const requests_msg = msg[8..];
     if (requests_msg.len < requests_count * @sizeOf(Request_type)) {
         return error{TooShortPacket};
@@ -88,34 +88,45 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
 fn connection_handler(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream, queue: *std.Deque(Request_vec), queue_mutext: *std.Io.Mutex) void {
     var flag: u32 = 0;
     var future = io.async(getMsg, .{ io, allocator, connection, &flag });
-    io.futexWaitTimeout(u32, &flag, 0, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+    io.futexWaitTimeout(u32, &flag, 0, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } }) catch return;
     const res: Request_vec = future.cancel(io) catch |err| {
         switch (err) {
-            getMsg_error.Cancelable => {},
-            else => std.log.err("error:{}\n", err),
+            getMsg_error.Canceled => {},
+            else => std.log.err("error:{}\n", .{err}),
         }
         return;
     };
-    queue_mutext.lock(io);
+    queue_mutext.lock(io) catch return;
     defer queue_mutext.unlock(io);
-    queue.pushBack(allocator, res);
+    queue.pushBack(allocator, res) catch |err| std.log.err("error:{}", .{err});
     io.futexWake(usize, &queue.len, 1);
 }
 
 const serverThread_id: u32 = 1 << 0;
-fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, thread_table: *u32) !void {
+fn serverThread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, thread_table: *u32) void {
     defer {
-        thread_table &= ~serverThread_id;
+        thread_table.* &= ~serverThread_id;
         io.futexWake(u32, thread_table, 1);
     }
     const port = 44099;
     const address = std.Io.net.IpAddress{ .ip4 = .unspecified(port) };
-    var server = try address.listen(io, .{ .mode = .stream, .protocol = .tcp, .reuse_address = true });
+    var server = address.listen(io, .{ .mode = .stream, .protocol = .tcp, .reuse_address = true }) catch |err| {
+        switch (err) {
+            error.Canceled => {},
+            else => std.log.err("error:{}", .{err}),
+        }
+        return;
+    };
     defer server.deinit(io);
     var group = std.Io.Group.init;
     defer group.cancel(io);
     while (true) {
-        const connection = try server.accept(io);
+        const connection = server.accept(io) catch |err| {
+            switch (err) {
+                error.Canceled => return,
+                else => continue,
+            }
+        };
         group.async(io, connection_handler, .{ io, allocator, connection, queue, queue_mutex });
     }
 }
@@ -185,7 +196,7 @@ fn getMessages(allocator: std.mem.Allocator, messages: *std.ArrayList(Message), 
 // _: [_]u8 = данные ответов по сдвигам
 // для сообщений схема аналогичная относительно начала ответа
 
-fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.ArrayList(Message), requests: Request_vec) !void {
+fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.ArrayList(Message), requests: Request_vec) (error{OutOfMemory} || std.Io.Writer.Error || error{IncorrectRequest})!void {
     var response = try std.ArrayList(u8).initCapacity(allocator, 64);
     defer response.deinit(allocator);
     for (requests.requests) |request| {
@@ -193,48 +204,47 @@ fn request_processor(io: std.Io, allocator: std.mem.Allocator, messages: *std.Ar
             .get_info => |req| switch (req) {
                 .msg_count => {
                     const res: u64 = @intCast(messages.items.len);
-                    try response.appendSlice(allocator, @bitCast(res));
+                    try response.appendSlice(allocator, &@as([8]u8, @bitCast(res)));
                 },
             },
             .get_msg => |req| {
                 const msgs = try getMessages(allocator, messages, req);
                 defer allocator.free(msgs);
-                response.appendSlice(allocator, @bitCast(@as(u64, @intCast(msgs.len))));
+                try response.appendSlice(allocator, &@as([8]u8, @bitCast(@as(u64, @intCast(msgs.len)))));
                 var cur_offset: u64 = 0;
                 for (msgs) |msg| {
-                    response.appendSlice(allocator, @bitCast(cur_offset));
+                    try response.appendSlice(allocator, &@as([8]u8, @bitCast(cur_offset)));
                     cur_offset += @intCast(msg.len);
                 }
                 for (msgs) |msg| {
-                    response.appendSlice(allocator, msg);
+                    try response.appendSlice(allocator, msg);
                 }
             },
             .send_msg => |req| {
-                const msg_text = try allocator.dupe(u8, request.data);
+                const msg_text = try allocator.dupe(u8, request.data orelse return error.IncorrectRequest);
                 const msg = Message{ .data = msg_text, .chat_id = req.chat_id };
-                messages.appendSlice(allocator, msg);
+                try messages.append(allocator, msg);
             },
         }
     }
 
     var writer = requests.connection.writer(io, &.{});
-    writer.interface.write(response.items);
-    requests.connection.close(io);
+    _ = try writer.interface.write(response.items);
     allocator.free(requests.requests);
 }
 const request_processor_thread_id: u32 = 1 << 1;
-fn request_processor_thread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Message), thread_table: *u32) !void {
+fn request_processor_thread(io: std.Io, allocator: std.mem.Allocator, queue: *std.Deque(Request_vec), queue_mutex: *std.Io.Mutex, messages: *std.ArrayList(Message), thread_table: *u32) void {
     defer {
-        thread_table &= ~request_processor_thread_id;
+        thread_table.* &= ~request_processor_thread_id;
         io.futexWake(u32, thread_table, 1);
     }
     while (true) {
-        io.futexWait(usize, &queue.len, 0);
-        queue_mutex.lock(io);
-        const requests = queue.popBack().?;
-        defer requests.deinit(allocator);
+        io.futexWait(usize, &queue.len, 0) catch return;
+        queue_mutex.lock(io) catch return;
+        var requests = queue.popBack().?;
+        defer requests.deinit(io, allocator);
         queue_mutex.unlock(io);
-        request_processor(io, allocator, messages, requests);
+        request_processor(io, allocator, messages, requests) catch return;
     }
 }
 
@@ -254,8 +264,15 @@ pub fn main(init: std.process.Init) !void {
 
     var queue_mutex = std.Io.Mutex.init;
     var queue = try std.Deque(Request_vec).initCapacity(allocator, 64);
+    var messages = try std.ArrayList(Message).initCapacity(allocator, 512);
+    defer allocator.free(messages);
     defer queue.deinit(allocator);
 
-    var thread_table: u32 = serverThread_id | request_processor_thread_id;
-    std.Thread.spawn(.{}, serverThread, .{ io, allocator, &queue, &queue_mutex, &thread_table });
+    const work_thread_table = serverThread_id | request_processor_thread_id;
+    var thread_table = work_thread_table;
+    var server = io.async(serverThread, .{ io, allocator, &queue, &queue_mutex, &thread_table });
+    defer server.cancel(io);
+    var request_processorThread = io.async(request_processor_thread, .{ io, allocator, &queue, &queue_mutex, &messages, &thread_table });
+    defer request_processorThread.cancel(io);
+    try io.futexWait(u32, &thread_table, work_thread_table);
 }
