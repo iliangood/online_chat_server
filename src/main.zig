@@ -64,9 +64,9 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
     const requests_count = std.mem.readInt(u64, msg[0..8], .little);
     const requests_msg = msg[8..];
     if (requests_msg.len < requests_count * @sizeOf(Request_type)) {
-        return error{TooShortPacket};
+        return error.TooShortPacket;
     }
-    const requests = @as([]Request_type, requests_msg[0 .. requests_count * @sizeOf(Request_type)]);
+    const requests = @as([]Request_type, @ptrCast(requests_msg[0 .. requests_count * @sizeOf(Request_type)]));
     var data = requests_msg[requests_count * @sizeOf(Request_type) ..];
     var res_requests = try allocator.alloc(Request, requests_count);
     for (requests, 0..) |request, i| {
