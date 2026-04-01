@@ -33,6 +33,12 @@ const Request_type = union(enum(u8)) {
     get_info: union(enum(u8)) {
         msg_count: void,
     },
+    fn read(data: *[@sizeOf(Request_type)]u8, comptime endiand: std.builtin.Endian) ?Request_type {
+        if (endiand == .native) {
+            var res: Request_type = undefined;
+            @memcpy(std.mem.asBytes(&res), data);
+        }
+    }
 };
 
 const Request = struct {
@@ -56,7 +62,7 @@ fn getMsg(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
     errdefer connection.close(io);
     var buf_reader: [16384]u8 = undefined;
     var reader = connection.reader(io, &buf_reader);
-    const msg = try reader.interface.allocRemaining(allocator, .unlimited);
+    const msg = try reader.interface.allocRemainingAlignedSentinel(allocator, .unlimited, @alignOf(Request), null);
     errdefer allocator.free(msg);
     if (msg.len < 8) {
         return getMsg_error.TooShortPacket;
