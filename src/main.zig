@@ -33,12 +33,8 @@ const Request_type = union(enum(u8)) {
     get_info: union(enum(u8)) {
         msg_count: void,
     },
-    fn read(data: *[@sizeOf(Request_type)]u8, comptime endiand: std.builtin.Endian) ?Request_type {
-        if (endiand == .native) {
-            var res: Request_type = undefined;
-            @memcpy(std.mem.asBytes(&res), data);
-        }
-    }
+    // fn serialize(self: *const Request_type, buf: [@sizeOf(Request_type)]
+    // fn deserialize(buf: [@sizeOf(Request_type)]) Request_type
 };
 
 const Request = struct {
