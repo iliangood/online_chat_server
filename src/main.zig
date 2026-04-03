@@ -33,7 +33,15 @@ const Request_type = union(enum(u8)) {
     get_info: union(enum(u8)) {
         msg_count: void,
     },
-    // fn serialize(self: *const Request_type, buf: [@sizeOf(Request_type)]
+    fn serialize(self: *const Request_type, writer: std.Io.Writer, endian: std.builtin.Endian) !void {
+        try writer.writeInt(u8, @intFromEnum(*self), endian);
+        switch (*self) {
+            .send_msg => |req| {
+                try writer.writeInt(u64, req.chat_id, endian);
+                try writer.writeInt(u64, req.len, endian);
+            },
+        }
+    }
     // fn deserialize(buf: [@sizeOf(Request_type)]) Request_type
 };
 
