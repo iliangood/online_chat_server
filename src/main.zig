@@ -40,6 +40,7 @@ const Request_type = union(enum(u8)) {
                 try writer.writeInt(u64, req.chat_id, endian);
                 try writer.writeInt(u64, req.len, endian);
             },
+            .get_msg => |req| {},
         }
     }
     // fn deserialize(buf: [@sizeOf(Request_type)]) Request_type
