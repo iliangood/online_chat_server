@@ -3,6 +3,7 @@ const Message = struct {
     chat_id: u64,
     data: []u8,
 };
+
 var should_exit = false;
 fn handleSigInt(sig: std.os.linux.SIG) callconv(.c) void {
     _ = sig;
@@ -41,6 +42,7 @@ const Request_type = union(enum(u8)) {
                 try writer.writeInt(u64, req.len, endian);
             },
             .get_msg => |req| {},
+            .get_info => |req| {},
         }
     }
     // fn deserialize(buf: [@sizeOf(Request_type)]) Request_type
