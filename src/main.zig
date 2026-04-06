@@ -23,6 +23,9 @@ const Msg_range = union(enum(u8)) {
 const Msgs_target = struct {
     chat_id: u64,
     mode: Msg_range,
+    fn serialize(self: *const Msgs_target, writer: std.Io.Writer, endian: std.builtin.Endian) !void {
+        writer.writeInt(u64, self.chat_id, endian);
+    }
 };
 
 const Request_type = union(enum(u8)) {
