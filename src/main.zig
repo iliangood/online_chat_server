@@ -18,6 +18,9 @@ const Msg_range = union(enum(u8)) {
         start: u64,
         end: u64,
     },
+    fn serialize(self: *const Msg_range, writer: std.Io.Writer, endian: std.builtin.Endian) !void {
+        switch (self.*) {}
+    }
 };
 
 const Msgs_target = struct {
